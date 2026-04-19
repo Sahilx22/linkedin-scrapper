@@ -1,0 +1,7 @@
+{
+  "name": "linkedin-scraper",
+  "version": "1.0.0",
+  "dependencies": {
+    "playwright": "^1.43.0"
+  }
+}
