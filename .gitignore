@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Credentials / config with secrets
+config.json
+
+# Scraped output data
+*.csv
+linkedin_posts.json
+diagnostic_report.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
