@@ -6,7 +6,8 @@ const OUTPUT_FILE  = "linkedin_posts.json";
 const CSV_FILE     = "linkedin_posts.csv";
 const TARGET_POSTS = config.targetPosts || 500;
 const SEARCH_URL   =
-  "https://www.linkedin.com/search/results/content/?keywords=%22python%20developer%22%20remote%20%222%20years%22&origin=GLOBAL_SEARCH_HEADER&sid=3xx&sortBy=%22date_posted%22";
+  // "https://www.linkedin.com/search/results/content/?keywords=%22Data%20Engineer%22%20and%20%223%20years%22&origin=FACETED_SEARCH&sid=-M%2C&sortBy=%22date_posted%22";
+  "https://www.linkedin.com/search/results/content/?keywords=(%22python%20developer%22%20OR%20%22python%20dev%22%20%20OR%20automation%20OR%20sdet)%20python%20hiring&origin=GLOBAL_SEARCH_HEADER&sid=R9n&sortBy=%22date_posted%22";
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function randomDelay(min = 1500, max = 3500) {
@@ -181,67 +182,99 @@ function dedupe(posts) {
   await sleep(4000);
   console.log("✅ Page loaded!\n");
 
-  // ── SCROLL-FIRST LOOP ─────────────────────────────────────────────────
+  // ── AUTO-SCROLL LOOP ──────────────────────────────────────────────────
   // Strategy:
-  //   1. Scroll down a bit (human-like, small steps)
-  //   2. Wait for LinkedIn to load NEW cards into DOM
-  //   3. Extract only after card count increases
-  //   4. Repeat until we have enough posts
+  //   1. Jump to absolute page bottom  → triggers LinkedIn's scroll observer
+  //   2. Nudge a few more pixels       → ensures the threshold fires
+  //   3. Poll for new DOM cards        → up to 12s before giving up this round
+  //   4. If stuck: scroll up then back → resets LinkedIn's IntersectionObserver
+  //   5. Click "Show more" if present  → handles paginated search results
+  //   6. Repeat until target reached
 
   let allPosts    = [];
   let scrollRound = 0;
   let stuckCount  = 0;
-  const MAX_STUCK = 5; // stop if DOM doesn't grow after 5 scroll attempts
+  const MAX_STUCK = 8;
 
-  console.log("📜 Scrolling and collecting posts...\n");
+  // helper — simulate real mouse-wheel scroll (fires LinkedIn's IntersectionObserver)
+  const wheelScroll = async (totalPx, stepPx = 500) => {
+    const steps = Math.ceil(totalPx / stepPx);
+    for (let i = 0; i < steps; i++) {
+      await page.mouse.wheel(0, stepPx);
+      await sleep(120);
+    }
+  };
+
+  // helper — try every known "load more" button variant
+  const clickShowMore = async () => {
+    const selectors = [
+      "button:has-text('Show more results')",
+      "button:has-text('See more results')",
+      "button:has-text('Load more')",
+    ];
+    for (const sel of selectors) {
+      try {
+        const btn = await page.$(sel);
+        if (btn && await btn.isVisible()) {
+          await btn.scrollIntoViewIfNeeded();
+          await btn.click();
+          console.log(`  ▶ Clicked load-more button`);
+          await sleep(3000);
+          return true;
+        }
+      } catch (_) {}
+    }
+    return false;
+  };
+
+  console.log("📜 Auto-scrolling and collecting posts...\n");
+
+  // Move mouse to centre of page so wheel events are received
+  await page.mouse.move(720, 450);
 
   while (allPosts.length < TARGET_POSTS && stuckCount < MAX_STUCK) {
     scrollRound++;
-
     const cardsBefore = await countCards(page);
 
-    // ── Scroll down in small human-like steps ──────────────────────────
-    const scrollSteps = Math.floor(Math.random() * 3) + 2; // 2-4 steps
-    for (let s = 0; s < scrollSteps; s++) {
-      const amount = Math.floor(Math.random() * 400) + 300; // 300-700px
-      await page.evaluate(px => window.scrollBy(0, px), amount);
-      await sleep(Math.floor(Math.random() * 600) + 400); // 400-1000ms between steps
-    }
+    // ── Wheel-scroll down (~3 viewport heights) ────────────────────────
+    await wheelScroll(2700, 500);
 
-    // ── Click "Show more results" if present ───────────────────────────
-    try {
-      const btn = await page.$("button:has-text('Show more results')");
-      if (btn) {
-        await btn.click();
-        console.log(`  ▶ Clicked 'Show more results'`);
-        await sleep(3000);
-      }
-    } catch (_) {}
+    // ── Click "Show more" if LinkedIn paginated instead of infinite ─────
+    await clickShowMore();
 
-    // ── Wait for NEW cards to appear in DOM ────────────────────────────
-    // Poll every 500ms for up to 8 seconds
+    // ── Poll up to 12s for new cards ───────────────────────────────────
     let cardsAfter = cardsBefore;
-    for (let wait = 0; wait < 16; wait++) {
+    for (let wait = 0; wait < 24; wait++) {
       await sleep(500);
       cardsAfter = await countCards(page);
       if (cardsAfter > cardsBefore) break;
     }
 
-    // ── Extract all posts from DOM ─────────────────────────────────────
+    // ── Unstick: wheel up then back down to reset observer ─────────────
+    if (cardsAfter === cardsBefore) {
+      console.log(`  ↩ Unsticking — scrolling up then back down...`);
+      await wheelScroll(-1500, 500);   // scroll up
+      await sleep(800);
+      await wheelScroll(2500, 500);   // scroll back down
+      await sleep(2000);
+      cardsAfter = await countCards(page);
+    }
+
+    // ── Extract and deduplicate ────────────────────────────────────────
     const freshPosts = await extractAll(page);
     const before = allPosts.length;
     allPosts = dedupe([...allPosts, ...freshPosts]);
     const added = allPosts.length - before;
 
     console.log(
-      `  Scroll ${scrollRound}: DOM cards ${cardsBefore}→${cardsAfter} | ` +
+      `  Round ${scrollRound}: cards ${cardsBefore}→${cardsAfter} | ` +
       `extracted ${freshPosts.length} | +${added} new | total ${allPosts.length}/${TARGET_POSTS}`
     );
 
     if (cardsAfter === cardsBefore && added === 0) {
       stuckCount++;
       console.log(`  ⏳ DOM not growing (${stuckCount}/${MAX_STUCK}) — waiting longer...`);
-      await sleep(4000); // extra wait before next scroll
+      await sleep(5000);
     } else {
       stuckCount = 0;
     }
@@ -253,8 +286,7 @@ function dedupe(posts) {
 
     if (allPosts.length >= TARGET_POSTS) break;
 
-    // Human-like pause between scroll rounds
-    await randomDelay(1500, 3000);
+    await randomDelay(800, 1800);
   }
 
   // ── Final save ────────────────────────────────────────────────────────
