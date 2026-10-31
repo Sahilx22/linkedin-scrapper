@@ -153,23 +153,13 @@ function dedupe(posts) {
   });
   const page = await context.newPage();
 
-  // ── Login (li_at session cookie) ────────────────────────────────────────
-  console.log("🔐 Logging in with saved session cookie...");
-  if (!config.li_at) {
-    throw new Error('Add your LinkedIn session cookie to config.json first: { "li_at": "..." }');
-  }
-  await context.addCookies([{
-    name: "li_at",
-    value: config.li_at,
-    domain: ".linkedin.com",
-    path: "/",
-  }]);
-  await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded" });
-  try { await page.waitForURL(/linkedin\.com\/(feed|checkpoint)/, { timeout: 20000 }); }
-  catch { await sleep(10000); }
-  if (page.url().includes("checkpoint")) {
-    console.log("⚠️  Complete verification in browser. Waiting 60s...");
-    await page.waitForURL(/linkedin\.com\/feed/, { timeout: 60000 });
+  // ── Login (manual) ───────────────────────────────────────────────────────
+  console.log("🔐 Opening LinkedIn login — log in manually in the browser window...");
+  await page.goto("https://www.linkedin.com/login", { waitUntil: "domcontentloaded" });
+  try {
+    await page.waitForURL(/linkedin\.com\/feed/, { timeout: 5 * 60 * 1000 });
+  } catch {
+    throw new Error("Timed out waiting for manual login (5 min). Re-run and log in sooner.");
   }
   console.log("✅ Logged in!\n");
   await randomDelay(2000, 3000);
