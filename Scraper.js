@@ -5,9 +5,7 @@ const config = require("./config.json");
 const OUTPUT_FILE  = "linkedin_posts.json";
 const CSV_FILE     = "linkedin_posts.csv";
 const TARGET_POSTS = config.targetPosts || 500;
-const SEARCH_URL   =
-  // "https://www.linkedin.com/search/results/content/?keywords=%22Data%20Engineer%22%20and%20%223%20years%22&origin=FACETED_SEARCH&sid=-M%2C&sortBy=%22date_posted%22";
-  "https://www.linkedin.com/search/results/content/?keywords=(%22python%20developer%22%20OR%20%22python%20dev%22%20%20OR%20automation%20OR%20sdet)%20python%20hiring&origin=GLOBAL_SEARCH_HEADER&sid=R9n&sortBy=%22date_posted%22";
+const SEARCH_URL   ="https://www.linkedin.com/search/results/content/?keywords=%22Data%20Analyst%22AND%20%22fresher%22&origin=SWITCH_SEARCH_VERTICAL";
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function randomDelay(min = 1500, max = 3500) {
@@ -155,15 +153,18 @@ function dedupe(posts) {
   });
   const page = await context.newPage();
 
-  // ── Login ─────────────────────────────────────────────────────────────
-  console.log("🔐 Logging in...");
-  await page.goto("https://www.linkedin.com/login", { waitUntil: "domcontentloaded" });
-  await randomDelay(1500, 2500);
-  await page.fill("#username", config.email);
-  await randomDelay(500, 1000);
-  await page.fill("#password", config.password);
-  await randomDelay(500, 1000);
-  await page.click('[type="submit"]');
+  // ── Login (li_at session cookie) ────────────────────────────────────────
+  console.log("🔐 Logging in with saved session cookie...");
+  if (!config.li_at) {
+    throw new Error('Add your LinkedIn session cookie to config.json first: { "li_at": "..." }');
+  }
+  await context.addCookies([{
+    name: "li_at",
+    value: config.li_at,
+    domain: ".linkedin.com",
+    path: "/",
+  }]);
+  await page.goto("https://www.linkedin.com/feed/", { waitUntil: "domcontentloaded" });
   try { await page.waitForURL(/linkedin\.com\/(feed|checkpoint)/, { timeout: 20000 }); }
   catch { await sleep(10000); }
   if (page.url().includes("checkpoint")) {

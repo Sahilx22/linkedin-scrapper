@@ -1,3 +1,8 @@
+# Secrets
+config.json
+scrape_profiles_selenium.py
+scrape_reactors.py
+
 # Dependencies
 node_modules/
 
