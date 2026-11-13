@@ -4,8 +4,18 @@ const config = require("./config.json");
 
 const OUTPUT_FILE  = "linkedin_posts.json";
 const CSV_FILE     = "linkedin_posts.csv";
-const TARGET_POSTS = config.targetPosts || 500;
-const SEARCH_URL   ="https://www.linkedin.com/search/results/content/?keywords=%22Data%20Analyst%22AND%20%22fresher%22&origin=SWITCH_SEARCH_VERTICAL";
+const TARGET_POSTS = config.targetPosts || 500; // per keyword
+
+// One search per entry in config.json's "keywords" array, e.g.:
+//   { "keywords": ["Data Analyst fresher", "Business Analyst fresher"] }
+// Falls back to the original single search if "keywords" isn't set.
+const KEYWORDS = Array.isArray(config.keywords) && config.keywords.length
+  ? config.keywords
+  : ['"Data Analyst"AND "fresher"'];
+
+function buildSearchUrl(keyword) {
+  return `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&origin=SWITCH_SEARCH_VERTICAL`;
+}
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function randomDelay(min = 1500, max = 3500) {
@@ -16,7 +26,7 @@ function saveJSON(posts) {
   console.log(`💾 Auto-saved ${posts.length} posts → ${OUTPUT_FILE}`);
 }
 function saveCSV(posts) {
-  const headers = ["id","author","authorHeadline","timestamp","content","likes","comments","reposts","postUrl"];
+  const headers = ["id","keyword","author","authorHeadline","timestamp","content","likes","comments","reposts","postUrl"];
   const rows = posts.map(p =>
     headers.map(h => `"${String(p[h]||"").replace(/"/g,'""')}"`).join(",")
   );
@@ -34,8 +44,8 @@ async function countCards(page) {
 }
 
 // ── Extract ALL cards currently visible in DOM ─────────────────────────────
-async function extractAll(page) {
-  return await page.evaluate(() => {
+async function extractAll(page, keyword) {
+  return await page.evaluate((keyword) => {
     const results = [];
     const cards = [...document.querySelectorAll("div[role='listitem']")]
       .filter(el => el.innerText?.includes("Feed post") || el.innerText?.trim().length > 80);
@@ -118,12 +128,12 @@ async function extractAll(page) {
           || card.getAttribute("id")
           || `post_${idx}_${content.slice(0,20).replace(/\W/g,"_")}`;
 
-        results.push({ id, author, authorHeadline, timestamp, content, likes, comments, reposts, postUrl });
+        results.push({ id, keyword, author, authorHeadline, timestamp, content, likes, comments, reposts, postUrl });
       } catch (_) {}
     });
 
     return results;
-  });
+  }, keyword);
 }
 
 function dedupe(posts) {
@@ -164,27 +174,16 @@ function dedupe(posts) {
   console.log("✅ Logged in!\n");
   await randomDelay(2000, 3000);
 
-  // ── Navigate ──────────────────────────────────────────────────────────
-  console.log("🔍 Loading search page...");
-  await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded" });
-  try {
-    await page.waitForSelector("div[role='listitem']", { timeout: 15000 });
-  } catch { /* proceed anyway */ }
-  await sleep(4000);
-  console.log("✅ Page loaded!\n");
-
-  // ── AUTO-SCROLL LOOP ──────────────────────────────────────────────────
-  // Strategy:
+  // ── AUTO-SCROLL LOOP (run once per keyword) ─────────────────────────────
+  // Strategy per keyword:
   //   1. Jump to absolute page bottom  → triggers LinkedIn's scroll observer
   //   2. Nudge a few more pixels       → ensures the threshold fires
   //   3. Poll for new DOM cards        → up to 12s before giving up this round
   //   4. If stuck: scroll up then back → resets LinkedIn's IntersectionObserver
   //   5. Click "Show more" if present  → handles paginated search results
-  //   6. Repeat until target reached
+  //   6. Repeat until this keyword's target is reached, then move to the next
 
-  let allPosts    = [];
-  let scrollRound = 0;
-  let stuckCount  = 0;
+  let allPosts = [];
   const MAX_STUCK = 8;
 
   // helper — simulate real mouse-wheel scroll (fires LinkedIn's IntersectionObserver)
@@ -218,66 +217,80 @@ function dedupe(posts) {
     return false;
   };
 
-  console.log("📜 Auto-scrolling and collecting posts...\n");
+  for (const [ki, keyword] of KEYWORDS.entries()) {
+    console.log(`\n🔎 [${ki + 1}/${KEYWORDS.length}] Searching: ${keyword}`);
+    await page.goto(buildSearchUrl(keyword), { waitUntil: "domcontentloaded" });
+    try {
+      await page.waitForSelector("div[role='listitem']", { timeout: 15000 });
+    } catch { /* proceed anyway */ }
+    await sleep(4000);
+    console.log("✅ Page loaded!\n");
 
-  // Move mouse to centre of page so wheel events are received
-  await page.mouse.move(720, 450);
+    console.log("📜 Auto-scrolling and collecting posts...\n");
+    await page.mouse.move(720, 450);
 
-  while (allPosts.length < TARGET_POSTS && stuckCount < MAX_STUCK) {
-    scrollRound++;
-    const cardsBefore = await countCards(page);
+    const postsBeforeKeyword = allPosts.length;
+    let scrollRound = 0;
+    let stuckCount  = 0;
 
-    // ── Wheel-scroll down (~3 viewport heights) ────────────────────────
-    await wheelScroll(2700, 500);
+    while (allPosts.length - postsBeforeKeyword < TARGET_POSTS && stuckCount < MAX_STUCK) {
+      scrollRound++;
+      const cardsBefore = await countCards(page);
 
-    // ── Click "Show more" if LinkedIn paginated instead of infinite ─────
-    await clickShowMore();
+      // ── Wheel-scroll down (~3 viewport heights) ────────────────────────
+      await wheelScroll(2700, 500);
 
-    // ── Poll up to 12s for new cards ───────────────────────────────────
-    let cardsAfter = cardsBefore;
-    for (let wait = 0; wait < 24; wait++) {
-      await sleep(500);
-      cardsAfter = await countCards(page);
-      if (cardsAfter > cardsBefore) break;
+      // ── Click "Show more" if LinkedIn paginated instead of infinite ─────
+      await clickShowMore();
+
+      // ── Poll up to 12s for new cards ───────────────────────────────────
+      let cardsAfter = cardsBefore;
+      for (let wait = 0; wait < 24; wait++) {
+        await sleep(500);
+        cardsAfter = await countCards(page);
+        if (cardsAfter > cardsBefore) break;
+      }
+
+      // ── Unstick: wheel up then back down to reset observer ─────────────
+      if (cardsAfter === cardsBefore) {
+        console.log(`  ↩ Unsticking — scrolling up then back down...`);
+        await wheelScroll(-1500, 500);   // scroll up
+        await sleep(800);
+        await wheelScroll(2500, 500);   // scroll back down
+        await sleep(2000);
+        cardsAfter = await countCards(page);
+      }
+
+      // ── Extract and deduplicate ────────────────────────────────────────
+      const freshPosts = await extractAll(page, keyword);
+      const before = allPosts.length;
+      allPosts = dedupe([...allPosts, ...freshPosts]);
+      const added = allPosts.length - before;
+
+      console.log(
+        `  Round ${scrollRound}: cards ${cardsBefore}→${cardsAfter} | ` +
+        `extracted ${freshPosts.length} | +${added} new | total for keyword ${allPosts.length - postsBeforeKeyword}/${TARGET_POSTS}`
+      );
+
+      if (cardsAfter === cardsBefore && added === 0) {
+        stuckCount++;
+        console.log(`  ⏳ DOM not growing (${stuckCount}/${MAX_STUCK}) — waiting longer...`);
+        await sleep(5000);
+      } else {
+        stuckCount = 0;
+      }
+
+      // Auto-save every 50 posts
+      if (allPosts.length > 0 && allPosts.length % 50 === 0) {
+        saveJSON(allPosts);
+      }
+
+      if (allPosts.length - postsBeforeKeyword >= TARGET_POSTS) break;
+
+      await randomDelay(800, 1800);
     }
 
-    // ── Unstick: wheel up then back down to reset observer ─────────────
-    if (cardsAfter === cardsBefore) {
-      console.log(`  ↩ Unsticking — scrolling up then back down...`);
-      await wheelScroll(-1500, 500);   // scroll up
-      await sleep(800);
-      await wheelScroll(2500, 500);   // scroll back down
-      await sleep(2000);
-      cardsAfter = await countCards(page);
-    }
-
-    // ── Extract and deduplicate ────────────────────────────────────────
-    const freshPosts = await extractAll(page);
-    const before = allPosts.length;
-    allPosts = dedupe([...allPosts, ...freshPosts]);
-    const added = allPosts.length - before;
-
-    console.log(
-      `  Round ${scrollRound}: cards ${cardsBefore}→${cardsAfter} | ` +
-      `extracted ${freshPosts.length} | +${added} new | total ${allPosts.length}/${TARGET_POSTS}`
-    );
-
-    if (cardsAfter === cardsBefore && added === 0) {
-      stuckCount++;
-      console.log(`  ⏳ DOM not growing (${stuckCount}/${MAX_STUCK}) — waiting longer...`);
-      await sleep(5000);
-    } else {
-      stuckCount = 0;
-    }
-
-    // Auto-save every 50 posts
-    if (allPosts.length > 0 && allPosts.length % 50 === 0) {
-      saveJSON(allPosts);
-    }
-
-    if (allPosts.length >= TARGET_POSTS) break;
-
-    await randomDelay(800, 1800);
+    console.log(`✅ Keyword done: ${allPosts.length - postsBeforeKeyword} posts (${allPosts.length} total so far)`);
   }
 
   // ── Final save ────────────────────────────────────────────────────────
